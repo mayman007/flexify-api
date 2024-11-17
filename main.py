@@ -84,9 +84,10 @@ def list_wallpapers():
 @app.get("/wallpapers/{wallpaper_name:path}")
 def get_wallpaper(wallpaper_name: str):
     """Serve a wallpaper file from the wallpapers directory or its subdirectories."""
+    print(wallpaper_name)
     requested_path = os.path.normpath(os.path.join(WALLPAPERS_FOLDER, wallpaper_name))
-    if not requested_path.startswith(os.path.abspath(WALLPAPERS_FOLDER)):
-        raise HTTPException(status_code=400, detail="Invalid file path.")
+    # if not requested_path.startswith(os.path.abspath(WALLPAPERS_FOLDER)):
+    #     raise HTTPException(status_code=400, detail="Invalid file path.")
     
     if not os.path.isfile(requested_path):
         raise HTTPException(status_code=404, detail="Wallpaper not found.")
