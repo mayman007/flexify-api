@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
-from typing import List, Dict
+from typing import List, Dict, Literal, Union
 import os
 from PIL import Image
 from collections import Counter
@@ -10,13 +10,33 @@ import uvicorn
 
 app = FastAPI()
 
-# Define paths to the hq and mid folders
-HQ_FOLDER = os.path.join("../flexify_assets/wallpapers", "hq")
-MID_FOLDER = os.path.join("../flexify_assets/wallpapers", "mid")
-CACHE_FILE = os.path.join("../flexify_assets/wallpapers", "metadata.json")
+# Define paths to the asset folders
+ASSET_PATHS = {
+    "wallpapers": {
+        "base": os.path.join("../flexify_assets/wallpapers"),
+        "subfolders": ["hq", "mid"],
+        "file_types": ('.png', '.jpg', '.jpeg', '.gif')
+    },
+    "widgets": {
+        "base": os.path.join("../flexify_assets/widgets"),
+        "subfolders": [],
+        "file_types": ('.png', '.jpg', '.jpeg', '.gif', '.kwgt')
+    },
+    "klwp": {
+        "base": os.path.join("../flexify_assets/klwp"),
+        "subfolders": [],
+        "file_types": ('.png', '.jpg', '.jpeg', '.gif', '.klwp')
+    }
+}
 
+# Cache files for different asset types
+CACHE_FILES = {
+    "wallpapers": os.path.join("../flexify_assets/wallpapers", "metadata.json"),
+    "widgets": os.path.join("../flexify_assets/widgets", "metadata.json"),
+    "klwp": os.path.join("../flexify_assets/klwp", "metadata.json")
+}
 
-# Pydantic model for wallpaper metadata
+# Pydantic models for different asset types
 class WallpaperResponse(BaseModel):
     name: str
     category: str
@@ -24,24 +44,36 @@ class WallpaperResponse(BaseModel):
     size: int
     colors: List[str]
 
+class WidgetResponse(BaseModel):
+    name: str
+    category: str
+    type: str  # 'image' or 'kwgt'
 
-# Cache storage
-metadata_cache = {}
+class KLWPResponse(BaseModel):
+    name: str
+    type: str  # Either 'klwp' or 'image'
 
+# Cache storage for different asset types
+metadata_caches = {
+    "wallpapers": {},
+    "widgets": {},
+    "klwp": {}
+}
 
-def load_cache():
-    """Load metadata cache from file."""
-    if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE, "r") as f:
+def load_cache(asset_type: str):
+    """Load metadata cache from file for specific asset type."""
+    cache_file = CACHE_FILES[asset_type]
+    if os.path.exists(cache_file):
+        with open(cache_file, "r") as f:
             return json.load(f)
     return {}
 
-
-def save_cache(cache: Dict):
-    """Save metadata cache to file."""
-    with open(CACHE_FILE, "w") as f:
+def save_cache(asset_type: str, cache: Dict):
+    """Save metadata cache to file for specific asset type."""
+    cache_file = CACHE_FILES[asset_type]
+    os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+    with open(cache_file, "w") as f:
         json.dump(cache, f, indent=4)
-
 
 def get_prominent_colors(image_path: str, num_colors: int = 5) -> List[str]:
     """Extract prominent colors from an image."""
@@ -56,33 +88,31 @@ def get_prominent_colors(image_path: str, num_colors: int = 5) -> List[str]:
     except Exception:
         return ["#000000"]
 
+def update_wallpaper_cache():
+    """Update the metadata cache for wallpapers."""
+    assets = {}
+    base_folder = ASSET_PATHS["wallpapers"]["base"]
 
-def update_cache():
-    """Update the metadata cache to include new or modified files."""
-    wallpapers = {}
-    for folder, folder_type in [(HQ_FOLDER, "hq"), (MID_FOLDER, "mid")]:
+    for subfolder in ASSET_PATHS["wallpapers"]["subfolders"]:
+        folder = os.path.join(base_folder, subfolder)
         if not os.path.exists(folder):
             continue
 
         for root, _, files in os.walk(folder):
             for file in files:
-                if file.endswith(('.png', '.jpg', '.jpeg', '.gif')):
+                if file.endswith(ASSET_PATHS["wallpapers"]["file_types"]):
                     file_path = os.path.join(root, file)
                     relative_path = os.path.relpath(file_path, folder)
                     category = os.path.dirname(relative_path)
                     last_modified = os.path.getmtime(file_path)
 
-                    # Cache key includes folder type for distinction
-                    cache_key = f"{folder_type}/{relative_path}"
+                    cache_key = f"{subfolder}/{relative_path}"
 
-                    # Check if already cached and up-to-date
-                    if cache_key in metadata_cache:
-                        cached_data = metadata_cache[cache_key]
-                        if cached_data["last_modified"] == last_modified:
-                            wallpapers[cache_key] = cached_data
-                            continue
+                    if (cache_key in metadata_caches["wallpapers"] and 
+                        metadata_caches["wallpapers"][cache_key]["last_modified"] == last_modified):
+                        assets[cache_key] = metadata_caches["wallpapers"][cache_key]
+                        continue
 
-                    # Process new or modified file
                     try:
                         size = os.path.getsize(file_path)
                         with Image.open(file_path) as img:
@@ -92,93 +122,205 @@ def update_cache():
                         resolution = "Unknown"
                         colors = ["#000000"]
 
-                    wallpapers[cache_key] = {
+                    assets[cache_key] = {
                         "name": file,
-                        "category": category,
+                        "category": category if category else "root",
                         "resolution": resolution,
                         "size": size,
                         "colors": colors,
                         "last_modified": last_modified,
-                        "folder_type": folder_type,
+                        "folder_type": subfolder
                     }
 
-    # Update the cache with the current files
-    metadata_cache.update(wallpapers)
+    metadata_caches["wallpapers"] = assets
+    save_cache("wallpapers", assets)
 
-    # Remove any files that are no longer present
-    cached_files = set(metadata_cache.keys())
-    current_files = set(wallpapers.keys())
-    for missing_file in cached_files - current_files:
-        del metadata_cache[missing_file]
+def update_widget_cache():
+    """Update the metadata cache for widgets."""
+    assets = {}
+    base_folder = ASSET_PATHS["widgets"]["base"]
 
-    save_cache(metadata_cache)
+    if not os.path.exists(base_folder):
+        return
+
+    last_modified = {}
+    for root, dirs, files in os.walk(base_folder):
+        last_modified[root] = max(
+            [os.path.getmtime(os.path.join(root, f)) for f in files]
+            if files else [0]
+        )
+
+    if "last_modified" in metadata_caches["widgets"]:
+        cache_is_valid = True
+        for path, mtime in last_modified.items():
+            if path not in metadata_caches["widgets"]["last_modified"] or \
+               metadata_caches["widgets"]["last_modified"][path] != mtime:
+                cache_is_valid = False
+                break
+                
+        if cache_is_valid:
+            return
+
+    widgets_list = []
+    for root, _, files in os.walk(base_folder):
+        category = os.path.relpath(root, base_folder)
+        if category == ".":
+            continue
+
+        for file in files:
+            if file.endswith(ASSET_PATHS["widgets"]["file_types"]):
+                file_type = 'kwgt' if file.endswith('.kwgt') else 'image'
+                widgets_list.append({
+                    "name": file,
+                    "category": category,
+                    "type": file_type
+                })
+
+    assets = {
+        "widgets": widgets_list,
+        "last_modified": last_modified
+    }
+
+    metadata_caches["widgets"] = assets
+    save_cache("widgets", assets)
+
+def update_klwp_cache():
+    """Update the metadata cache for KLWP files."""
+    assets = []
+    base_folder = ASSET_PATHS["klwp"]["base"]
+
+    if not os.path.exists(base_folder):
+        return
+
+    last_modified = os.path.getmtime(base_folder)
+
+    # Check if the cache is up to date
+    if "last_modified" in metadata_caches["klwp"] and \
+       metadata_caches["klwp"]["last_modified"] == last_modified:
+        return
+
+    # Get all files with supported file types
+    for file in os.listdir(base_folder):
+        if file.endswith(ASSET_PATHS["klwp"]["file_types"]):
+            file_type = 'klwp' if file.endswith('.klwp') else 'image'
+            assets.append({
+                "name": file,
+                "type": file_type
+            })
+
+    assets = {
+        "klwp": assets,
+        "last_modified": last_modified
+    }
+
+    metadata_caches["klwp"] = assets
+    save_cache("klwp", assets)
 
 
 @app.on_event("startup")
 def on_startup():
-    """Load cache and update it on startup."""
-    global metadata_cache
-    metadata_cache = load_cache()
-    update_cache()
-
+    """Load caches and update them on startup."""
+    metadata_caches["wallpapers"] = load_cache("wallpapers")
+    metadata_caches["widgets"] = load_cache("widgets")
+    metadata_caches["klwp"] = load_cache("klwp")
+    update_wallpaper_cache()
+    update_widget_cache()
+    update_klwp_cache()
 
 @app.get("/wallpapers/{folder_type}", response_model=List[WallpaperResponse])
 def list_wallpapers_by_folder(folder_type: str):
-    """List wallpapers filtered by folder type ('hq' or 'mid')."""
+    """List wallpapers filtered by folder type."""
     if folder_type not in {"hq", "mid"}:
         raise HTTPException(
             status_code=400,
             detail="Invalid folder type. Use 'hq' or 'mid'."
         )
 
-    update_cache()  # Ensure the cache is up-to-date
-    filtered_wallpapers = [
-        data
-        for key, data in metadata_cache.items()
+    update_wallpaper_cache()
+    filtered_assets = [
+        data for data in metadata_caches["wallpapers"].values()
         if data["folder_type"] == folder_type
     ]
-    if not filtered_wallpapers:
+
+    if not filtered_assets:
         raise HTTPException(
             status_code=404,
             detail=f"No wallpapers found in folder '{folder_type}'."
         )
-    return filtered_wallpapers
+    return filtered_assets
+
+@app.get("/widgets", response_model=List[WidgetResponse])
+def list_all_widgets():
+    """List all widgets with their types and categories."""
+    update_widget_cache()
+    return metadata_caches["widgets"]["widgets"]
+
+@app.get("/klwp", response_model=List[KLWPResponse])
+def list_all_klwp():
+    """List all KLWP files and supported images."""
+    update_klwp_cache()
+    return metadata_caches["klwp"]["klwp"]
 
 
-@app.get("/wallpapers/{folder_type}/{category}", response_model=List[WallpaperResponse])
-def list_wallpapers_by_category(folder_type: str, category: str):
-    """List wallpapers filtered by folder type and category."""
-    if folder_type not in {"hq", "mid"}:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid folder type. Use 'hq' or 'mid'."
-        )
-
-    # Determine the absolute path to the category
-    folder_path = os.path.abspath(HQ_FOLDER if folder_type == "hq" else MID_FOLDER)
-    category_path = os.path.abspath(os.path.join(folder_path, category))
-
-    # Ensure the category path exists and is within the folder_path
-    if not category_path.startswith(folder_path) or not os.path.isdir(category_path):
-        raise HTTPException(status_code=404, detail="Category not found.")
-
-    # Update cache to ensure it's up-to-date
-    update_cache()
-
-    # Filter wallpapers by category
-    filtered_wallpapers = [
-        data
-        for key, data in metadata_cache.items()
-        if data["folder_type"] == folder_type and data["category"] == category
+@app.get("/widgets/{category}", response_model=List[WidgetResponse])
+def list_widgets_by_category(category: str):
+    """List widgets in a specific category."""
+    update_widget_cache()
+    filtered_assets = [
+        widget for widget in metadata_caches["widgets"]["widgets"]
+        if widget["category"] == category
     ]
 
-    if not filtered_wallpapers:
+    if not filtered_assets:
         raise HTTPException(
             status_code=404,
-            detail=f"No wallpapers found in category '{category}'."
+            detail=f"No widgets found in category '{category}'."
+        )
+    return filtered_assets
+
+@app.get("/widgets/{category}/{filename}")
+def get_widget_file(category: str, filename: str):
+    """
+    Serve the actual widget file.
+    """
+    base_path = ASSET_PATHS["widgets"]["base"]
+    file_path = os.path.join(base_path, category, filename)
+
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found.")
+    
+    if filename.endswith('.kwgt'):
+        return FileResponse(
+            path=file_path,
+            filename=filename,
+            media_type='application/octet-stream',
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}"
+            }
+        )
+    
+    return FileResponse(path=file_path)
+
+@app.get("/klwp/{filename}")  # Simplified KLWP file serving endpoint
+def get_klwp_file(filename: str):
+    """Serve the actual KLWP file"""
+    base_path = ASSET_PATHS["klwp"]["base"]
+    file_path = os.path.join(base_path, filename)
+
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found.")
+    
+    if filename.endswith('.klwp'):
+        return FileResponse(
+            path=file_path,
+            filename=filename,
+            media_type='application/octet-stream',
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}"
+            }
         )
 
-    return filtered_wallpapers
+    return FileResponse(path=file_path)
 
 @app.get("/wallpapers/{folder_type}/{category}/{filename}")
 def get_wallpaper_file(folder_type: str, category: str, filename: str):
@@ -189,16 +331,13 @@ def get_wallpaper_file(folder_type: str, category: str, filename: str):
             detail="Invalid folder type. Use 'hq' or 'mid'."
         )
 
-    folder_path = HQ_FOLDER if folder_type == "hq" else MID_FOLDER
-    category_path = os.path.join(folder_path, category)
-    file_path = os.path.join(category_path, filename)
+    base_path = ASSET_PATHS["wallpapers"]["base"]
+    file_path = os.path.join(base_path, folder_type, category, filename)
 
-    # Check if the file exists
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found.")
 
     return FileResponse(file_path)
-
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
