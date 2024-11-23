@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
-from typing import List, Dict, Literal, Union
+from typing import List, Dict
 import os
 from PIL import Image
 from collections import Counter
@@ -9,8 +9,8 @@ import json
 import uvicorn
 import aiofiles
 import asyncio
-from functools import partial
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 
 app = FastAPI()
 
@@ -236,9 +236,10 @@ async def update_klwp_cache():
     metadata_caches["klwp"] = assets_dict
     await save_cache("klwp", assets_dict)
 
-@app.on_event("startup")
-async def on_startup():
-    """Async load caches and update them on startup."""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager to handle startup and shutdown."""
+    # Startup logic
     metadata_caches["wallpapers"] = await load_cache("wallpapers")
     metadata_caches["widgets"] = await load_cache("widgets")
     metadata_caches["klwp"] = await load_cache("klwp")
@@ -247,6 +248,10 @@ async def on_startup():
         update_widget_cache(),
         update_klwp_cache()
     )
+    yield  # Application runs here
+    # Shutdown logic (if any) can go here
+
+app.router.lifespan_context = lifespan
 
 @app.get("/wallpapers/{folder_type}", response_model=List[WallpaperResponse])
 async def list_wallpapers_by_folder(folder_type: str):
