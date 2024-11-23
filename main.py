@@ -7,6 +7,10 @@ from collections import Counter
 from pydantic import BaseModel
 import json
 import uvicorn
+import aiofiles
+import asyncio
+from functools import partial
+from concurrent.futures import ThreadPoolExecutor
 
 app = FastAPI()
 
@@ -36,7 +40,7 @@ CACHE_FILES = {
     "klwp": os.path.join("../flexify_assets/klwp", "metadata.json")
 }
 
-# Pydantic models for different asset types
+# Pydantic models remain the same
 class WallpaperResponse(BaseModel):
     name: str
     category: str
@@ -47,36 +51,40 @@ class WallpaperResponse(BaseModel):
 class WidgetResponse(BaseModel):
     name: str
     category: str
-    type: str  # 'image' or 'kwgt'
+    type: str
 
 class KLWPResponse(BaseModel):
     name: str
-    type: str  # Either 'klwp' or 'image'
+    type: str
 
-# Cache storage for different asset types
+# Cache storage
 metadata_caches = {
     "wallpapers": {},
     "widgets": {},
     "klwp": {}
 }
 
-def load_cache(asset_type: str):
-    """Load metadata cache from file for specific asset type."""
+# Create a ThreadPoolExecutor for CPU-bound tasks
+thread_pool = ThreadPoolExecutor()
+
+async def load_cache(asset_type: str) -> Dict:
+    """Async load metadata cache from file."""
     cache_file = CACHE_FILES[asset_type]
     if os.path.exists(cache_file):
-        with open(cache_file, "r") as f:
-            return json.load(f)
+        async with aiofiles.open(cache_file, "r") as f:
+            content = await f.read()
+            return json.loads(content)
     return {}
 
-def save_cache(asset_type: str, cache: Dict):
-    """Save metadata cache to file for specific asset type."""
+async def save_cache(asset_type: str, cache: Dict):
+    """Async save metadata cache to file."""
     cache_file = CACHE_FILES[asset_type]
     os.makedirs(os.path.dirname(cache_file), exist_ok=True)
-    with open(cache_file, "w") as f:
-        json.dump(cache, f, indent=4)
+    async with aiofiles.open(cache_file, "w") as f:
+        await f.write(json.dumps(cache, indent=4))
 
 def get_prominent_colors(image_path: str, num_colors: int = 5) -> List[str]:
-    """Extract prominent colors from an image."""
+    """Extract prominent colors from an image (CPU-bound, runs in thread pool)."""
     try:
         with Image.open(image_path) as img:
             img = img.resize((100, 100))
@@ -88,10 +96,38 @@ def get_prominent_colors(image_path: str, num_colors: int = 5) -> List[str]:
     except Exception:
         return ["#000000"]
 
-def update_wallpaper_cache():
-    """Update the metadata cache for wallpapers."""
+async def process_wallpaper(file_path: str, subfolder: str, relative_path: str, last_modified: float):
+    """Process a single wallpaper file asynchronously."""
+    category = os.path.dirname(relative_path)
+    cache_key = f"{subfolder}/{relative_path}"
+    size = os.path.getsize(file_path)
+
+    # Run CPU-bound image processing in thread pool
+    loop = asyncio.get_running_loop()
+    colors = await loop.run_in_executor(thread_pool, get_prominent_colors, file_path)
+    
+    resolution = "Unknown"
+    try:
+        with Image.open(file_path) as img:
+            resolution = f"{img.width}x{img.height}"
+    except Exception:
+        pass
+
+    return cache_key, {
+        "name": os.path.basename(file_path),
+        "category": category if category else "root",
+        "resolution": resolution,
+        "size": size,
+        "colors": colors,
+        "last_modified": last_modified,
+        "folder_type": subfolder
+    }
+
+async def update_wallpaper_cache():
+    """Async update the metadata cache for wallpapers."""
     assets = {}
     base_folder = ASSET_PATHS["wallpapers"]["base"]
+    tasks = []
 
     for subfolder in ASSET_PATHS["wallpapers"]["subfolders"]:
         folder = os.path.join(base_folder, subfolder)
@@ -103,40 +139,26 @@ def update_wallpaper_cache():
                 if file.endswith(ASSET_PATHS["wallpapers"]["file_types"]):
                     file_path = os.path.join(root, file)
                     relative_path = os.path.relpath(file_path, folder)
-                    category = os.path.dirname(relative_path)
                     last_modified = os.path.getmtime(file_path)
 
                     cache_key = f"{subfolder}/{relative_path}"
-
                     if (cache_key in metadata_caches["wallpapers"] and 
                         metadata_caches["wallpapers"][cache_key]["last_modified"] == last_modified):
                         assets[cache_key] = metadata_caches["wallpapers"][cache_key]
                         continue
 
-                    try:
-                        size = os.path.getsize(file_path)
-                        with Image.open(file_path) as img:
-                            resolution = f"{img.width}x{img.height}"
-                            colors = get_prominent_colors(file_path)
-                    except Exception:
-                        resolution = "Unknown"
-                        colors = ["#000000"]
+                    tasks.append(process_wallpaper(file_path, subfolder, relative_path, last_modified))
 
-                    assets[cache_key] = {
-                        "name": file,
-                        "category": category if category else "root",
-                        "resolution": resolution,
-                        "size": size,
-                        "colors": colors,
-                        "last_modified": last_modified,
-                        "folder_type": subfolder
-                    }
+    if tasks:
+        results = await asyncio.gather(*tasks)
+        for cache_key, data in results:
+            assets[cache_key] = data
 
     metadata_caches["wallpapers"] = assets
-    save_cache("wallpapers", assets)
+    await save_cache("wallpapers", assets)
 
-def update_widget_cache():
-    """Update the metadata cache for widgets."""
+async def update_widget_cache():
+    """Async update the metadata cache for widgets."""
     assets = {}
     base_folder = ASSET_PATHS["widgets"]["base"]
 
@@ -182,10 +204,10 @@ def update_widget_cache():
     }
 
     metadata_caches["widgets"] = assets
-    save_cache("widgets", assets)
+    await save_cache("widgets", assets)
 
-def update_klwp_cache():
-    """Update the metadata cache for KLWP files."""
+async def update_klwp_cache():
+    """Async update the metadata cache for KLWP files."""
     assets = []
     base_folder = ASSET_PATHS["klwp"]["base"]
 
@@ -194,12 +216,10 @@ def update_klwp_cache():
 
     last_modified = os.path.getmtime(base_folder)
 
-    # Check if the cache is up to date
     if "last_modified" in metadata_caches["klwp"] and \
        metadata_caches["klwp"]["last_modified"] == last_modified:
         return
 
-    # Get all files with supported file types
     for file in os.listdir(base_folder):
         if file.endswith(ASSET_PATHS["klwp"]["file_types"]):
             file_type = 'klwp' if file.endswith('.klwp') else 'image'
@@ -208,27 +228,28 @@ def update_klwp_cache():
                 "type": file_type
             })
 
-    assets = {
+    assets_dict = {
         "klwp": assets,
         "last_modified": last_modified
     }
 
-    metadata_caches["klwp"] = assets
-    save_cache("klwp", assets)
-
+    metadata_caches["klwp"] = assets_dict
+    await save_cache("klwp", assets_dict)
 
 @app.on_event("startup")
-def on_startup():
-    """Load caches and update them on startup."""
-    metadata_caches["wallpapers"] = load_cache("wallpapers")
-    metadata_caches["widgets"] = load_cache("widgets")
-    metadata_caches["klwp"] = load_cache("klwp")
-    update_wallpaper_cache()
-    update_widget_cache()
-    update_klwp_cache()
+async def on_startup():
+    """Async load caches and update them on startup."""
+    metadata_caches["wallpapers"] = await load_cache("wallpapers")
+    metadata_caches["widgets"] = await load_cache("widgets")
+    metadata_caches["klwp"] = await load_cache("klwp")
+    await asyncio.gather(
+        update_wallpaper_cache(),
+        update_widget_cache(),
+        update_klwp_cache()
+    )
 
 @app.get("/wallpapers/{folder_type}", response_model=List[WallpaperResponse])
-def list_wallpapers_by_folder(folder_type: str):
+async def list_wallpapers_by_folder(folder_type: str):
     """List wallpapers filtered by folder type."""
     if folder_type not in {"hq", "mid"}:
         raise HTTPException(
@@ -236,7 +257,7 @@ def list_wallpapers_by_folder(folder_type: str):
             detail="Invalid folder type. Use 'hq' or 'mid'."
         )
 
-    update_wallpaper_cache()
+    await update_wallpaper_cache()
     filtered_assets = [
         data for data in metadata_caches["wallpapers"].values()
         if data["folder_type"] == folder_type
@@ -250,22 +271,21 @@ def list_wallpapers_by_folder(folder_type: str):
     return filtered_assets
 
 @app.get("/widgets", response_model=List[WidgetResponse])
-def list_all_widgets():
+async def list_all_widgets():
     """List all widgets with their types and categories."""
-    update_widget_cache()
+    await update_widget_cache()
     return metadata_caches["widgets"]["widgets"]
 
 @app.get("/klwp", response_model=List[KLWPResponse])
-def list_all_klwp():
+async def list_all_klwp():
     """List all KLWP files and supported images."""
-    update_klwp_cache()
+    await update_klwp_cache()
     return metadata_caches["klwp"]["klwp"]
 
-
 @app.get("/widgets/{category}", response_model=List[WidgetResponse])
-def list_widgets_by_category(category: str):
+async def list_widgets_by_category(category: str):
     """List widgets in a specific category."""
-    update_widget_cache()
+    await update_widget_cache()
     filtered_assets = [
         widget for widget in metadata_caches["widgets"]["widgets"]
         if widget["category"] == category
@@ -279,10 +299,8 @@ def list_widgets_by_category(category: str):
     return filtered_assets
 
 @app.get("/widgets/{category}/{filename}")
-def get_widget_file(category: str, filename: str):
-    """
-    Serve the actual widget file.
-    """
+async def get_widget_file(category: str, filename: str):
+    """Serve the actual widget file."""
     base_path = ASSET_PATHS["widgets"]["base"]
     file_path = os.path.join(base_path, category, filename)
 
@@ -301,8 +319,8 @@ def get_widget_file(category: str, filename: str):
     
     return FileResponse(path=file_path)
 
-@app.get("/klwp/{filename}")  # Simplified KLWP file serving endpoint
-def get_klwp_file(filename: str):
+@app.get("/klwp/{filename}")
+async def get_klwp_file(filename: str):
     """Serve the actual KLWP file"""
     base_path = ASSET_PATHS["klwp"]["base"]
     file_path = os.path.join(base_path, filename)
@@ -323,7 +341,7 @@ def get_klwp_file(filename: str):
     return FileResponse(path=file_path)
 
 @app.get("/wallpapers/{folder_type}/{category}/{filename}")
-def get_wallpaper_file(folder_type: str, category: str, filename: str):
+async def get_wallpaper_file(folder_type: str, category: str, filename: str):
     """Serve the actual wallpaper file."""
     if folder_type not in {"hq", "mid"}:
         raise HTTPException(
@@ -338,6 +356,32 @@ def get_wallpaper_file(folder_type: str, category: str, filename: str):
         raise HTTPException(status_code=404, detail="File not found.")
 
     return FileResponse(file_path)
+
+@app.get("/wallpapers/{folder_type}/{category}", response_model=List[WallpaperResponse])
+async def list_wallpapers_by_category(folder_type: str, category: str):
+    """List all wallpapers in a specific category folder."""
+    if folder_type not in {"hq", "mid"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid folder type. Use 'hq' or 'mid'."
+        )
+
+    await update_wallpaper_cache()
+    
+    # Filter assets by both folder type and category
+    filtered_assets = [
+        data for data in metadata_caches["wallpapers"].values()
+        if data["folder_type"] == folder_type and data["category"] == category
+    ]
+
+    if not filtered_assets:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No wallpapers found in category '{category}' for folder type '{folder_type}'."
+        )
+    
+    # Sort by name for consistent ordering
+    return sorted(filtered_assets, key=lambda x: x["name"])
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
