@@ -255,7 +255,7 @@ app.router.lifespan_context = lifespan
 
 @app.get("/wallpapers/{folder_type}", response_model=List[WallpaperResponse])
 async def list_wallpapers_by_folder(folder_type: str):
-    """List wallpapers filtered by folder type."""
+    """List wallpapers filtered by folder type and sorted by last_modified."""
     if folder_type not in {"hq", "mid"}:
         raise HTTPException(
             status_code=400,
@@ -273,23 +273,32 @@ async def list_wallpapers_by_folder(folder_type: str):
             status_code=404,
             detail=f"No wallpapers found in folder '{folder_type}'."
         )
-    return filtered_assets
+
+    # Sort by last_modified
+    return sorted(filtered_assets, key=lambda x: x["last_modified"], reverse=True)
 
 @app.get("/widgets", response_model=List[WidgetResponse])
 async def list_all_widgets():
-    """List all widgets with their types and categories."""
+    """List all widgets with their types and categories, sorted by last_modified."""
     await update_widget_cache()
-    return metadata_caches["widgets"]["widgets"]
+    widgets = metadata_caches["widgets"]["widgets"]
+
+    # Assuming last_modified is part of the widget structure
+    return sorted(widgets, key=lambda x: x.get("last_modified", 0), reverse=True)
 
 @app.get("/klwp", response_model=List[KLWPResponse])
 async def list_all_klwp():
-    """List all KLWP files and supported images."""
+    """List all KLWP files and supported images, sorted by last_modified."""
     await update_klwp_cache()
-    return metadata_caches["klwp"]["klwp"]
+    klwp = metadata_caches["klwp"]["klwp"]
+
+    # Assuming last_modified is part of the klwp structure
+    return sorted(klwp, key=lambda x: x.get("last_modified", 0), reverse=True)
+
 
 @app.get("/widgets/{category}", response_model=List[WidgetResponse])
 async def list_widgets_by_category(category: str):
-    """List widgets in a specific category."""
+    """List widgets in a specific category, sorted by last_modified."""
     await update_widget_cache()
     filtered_assets = [
         widget for widget in metadata_caches["widgets"]["widgets"]
@@ -301,7 +310,36 @@ async def list_widgets_by_category(category: str):
             status_code=404,
             detail=f"No widgets found in category '{category}'."
         )
-    return filtered_assets
+
+    # Sort by last_modified (default to 0 if not present)
+    return sorted(filtered_assets, key=lambda x: x.get("last_modified", 0), reverse=True)
+
+@app.get("/wallpapers/{folder_type}/{category}", response_model=List[WallpaperResponse])
+async def list_wallpapers_by_category(folder_type: str, category: str):
+    """List all wallpapers in a specific category folder, sorted by last_modified."""
+    if folder_type not in {"hq", "mid"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid folder type. Use 'hq' or 'mid'."
+        )
+
+    await update_wallpaper_cache()
+
+    # Filter assets by both folder type and category
+    filtered_assets = [
+        data for data in metadata_caches["wallpapers"].values()
+        if data["folder_type"] == folder_type and data["category"] == category
+    ]
+
+    if not filtered_assets:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No wallpapers found in category '{category}' for folder type '{folder_type}'."
+        )
+
+    # Sort by last_modified
+    return sorted(filtered_assets, key=lambda x: x["last_modified"], reverse=True)
+
 
 @app.get("/widgets/{category}/{filename}")
 async def get_widget_file(category: str, filename: str):
@@ -362,31 +400,9 @@ async def get_wallpaper_file(folder_type: str, category: str, filename: str):
 
     return FileResponse(file_path)
 
-@app.get("/wallpapers/{folder_type}/{category}", response_model=List[WallpaperResponse])
-async def list_wallpapers_by_category(folder_type: str, category: str):
-    """List all wallpapers in a specific category folder."""
-    if folder_type not in {"hq", "mid"}:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid folder type. Use 'hq' or 'mid'."
-        )
-
-    await update_wallpaper_cache()
-    
-    # Filter assets by both folder type and category
-    filtered_assets = [
-        data for data in metadata_caches["wallpapers"].values()
-        if data["folder_type"] == folder_type and data["category"] == category
-    ]
-
-    if not filtered_assets:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No wallpapers found in category '{category}' for folder type '{folder_type}'."
-        )
-    
-    # Sort by name for consistent ordering
-    return sorted(filtered_assets, key=lambda x: x["name"])
+@app.get("/favicon.ico", include_in_schema=False)
+async def ignore_favicon():
+    return {"message": "No favicon available"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
