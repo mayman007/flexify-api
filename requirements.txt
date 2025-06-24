@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+pillow
+aiofiles
+scikit-learn
+python-dotenv
