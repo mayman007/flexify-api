@@ -70,7 +70,7 @@ A FastAPI-based REST API for serving wallpapers, KWGT widgets, and KLWP files wi
    Widgets/
    ├── category1/
    │   ├── widget1.kwgt
-   │   └── widget2.png (preview image)
+   │   └── widget1.png (preview image)
    └── category2/
        ├── widget2.kwgt
        └── widget2.png (preview image)
