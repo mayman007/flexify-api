@@ -82,7 +82,7 @@ A FastAPI-based REST API for serving wallpapers, KWGT widgets, and KLWP files wi
    └── theme2.png (preview image)
    ```
 
-Note: Same wallpaper in different quality folders must hold the same name.
+Note: Same wallpapers and categories in different quality folders must hold the same names.
 
 ## Running the API
 
