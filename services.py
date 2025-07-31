@@ -38,73 +38,80 @@ async def save_cache(asset_type: str, cache: Dict):
     async with aiofiles.open(cache_file, "w") as f:
         await f.write(json.dumps(cache, indent=4))
 
-def get_prominent_colors(image_path: str, num_colors: int = 5) -> List[str]:
+def _process_wallpaper_blocking_tasks(file_path: str) -> Dict:
     """
-    Extract prominent colors using a faster k-means configuration,
-    and handle images with few colors gracefully.
+    Synchronous worker that performs all blocking I/O and CPU-bound tasks for one file.
+    This function is meant to be run in a thread pool.
     """
     try:
-        with Image.open(image_path) as img:
-            img = img.resize((100, 100))
-            img = img.convert("RGB")
-            pixels = np.array(img).reshape(-1, 3)
+        # --- Blocking Task 1: Get file size ---
+        size = os.path.getsize(file_path)
 
-        unique_pixels = np.unique(pixels, axis=0)
+        with Image.open(file_path) as img:
+            # --- Blocking Task 2: Get image resolution ---
+            resolution = f"{img.width}x{img.height}"
 
-        if len(unique_pixels) < num_colors:
-            colors = [f"#{r:02x}{g:02x}{b:02x}" for r, g, b in unique_pixels]
-            padding_color = colors[0] if colors else "#000000"
-            while len(colors) < num_colors:
-                colors.append(padding_color)
-            return colors[:num_colors]
+            # --- CPU-Bound Task: Get prominent colors ---
+            img_resized = img.resize((100, 100)).convert("RGB")
+            pixels = np.array(img_resized).reshape(-1, 3)
+            unique_pixels = np.unique(pixels, axis=0)
+            num_colors = 5
 
-        # --- OPTIMIZATION ---
-        # Changed n_init from 10 to 1 for a major speed improvement.
-        kmeans = KMeans(n_clusters=num_colors, random_state=42, n_init=1) 
-        kmeans.fit(pixels)
-        cluster_centers = kmeans.cluster_centers_
-
-        colors = [f"#{int(r):02x}{int(g):02x}{int(b):02x}" for r, g, b in cluster_centers]
-        return colors
+            if len(unique_pixels) < num_colors:
+                # Handle images with few colors
+                colors_list = [f"#{r:02x}{g:02x}{b:02x}" for r, g, b in unique_pixels]
+                padding_color = colors_list[0] if colors_list else "#000000"
+                while len(colors_list) < num_colors:
+                    colors_list.append(padding_color)
+                colors = colors_list[:num_colors]
+            else:
+                # Run KMeans
+                kmeans = KMeans(n_clusters=num_colors, random_state=42, n_init=1)
+                kmeans.fit(pixels)
+                cluster_centers = kmeans.cluster_centers_
+                colors = [f"#{int(r):02x}{int(g):02x}{int(b):02x}" for r, g, b in cluster_centers]
         
+        return {"size": size, "resolution": resolution, "colors": colors, "error": None}
+
     except Exception as e:
-        # Improved error logging to show the exact problem
-        print(f"--- DETAILED ERROR in get_prominent_colors ---")
-        print(f"File: {image_path}")
+        # Catch any error during processing and report it
+        print(f"--- Error processing {os.path.basename(file_path)} ---")
         print(traceback.format_exc())
-        print(f"--------------------------------------------")
-        return ["#000000"] * num_colors
+        print("-------------------------------------------------")
+        return {
+            "size": 0,
+            "resolution": "Unknown",
+            "colors": ["#000000"] * 5,
+            "error": str(e)
+        }
 
 async def process_wallpaper(file_path: str, subfolder: str, relative_path: str, last_modified: float):
-    """Process a single wallpaper file asynchronously."""
-    category = os.path.dirname(relative_path)
-    cache_key = f"{subfolder}/{relative_path}"
-    size = os.path.getsize(file_path)
-
-    # Run CPU-bound image processing in thread pool with a timeout
+    """
+    Asynchronously process a single wallpaper by offloading all blocking work to a thread.
+    """
     loop = asyncio.get_running_loop()
+    cache_key = f"{subfolder}/{relative_path}"
+    category = os.path.dirname(relative_path) or "root"
+
     try:
-        colors = await asyncio.wait_for(
-            loop.run_in_executor(thread_pool, get_prominent_colors, file_path),
-            timeout=10.0  # 10-second timeout for color extraction
+        # Run the single, consolidated blocking function in the thread pool.
+        # Increased timeout slightly as it does all work now.
+        result_data = await asyncio.wait_for(
+            loop.run_in_executor(thread_pool, _process_wallpaper_blocking_tasks, file_path),
+            timeout=20.0 
         )
     except asyncio.TimeoutError:
-        print(f"Timeout processing image for prominent colors: {file_path}")
-        colors = ["#000000"] * 5  # Default colors on timeout
-    
-    resolution = "Unknown"
-    try:
-        with Image.open(file_path) as img:
-            resolution = f"{img.width}x{img.height}"
-    except Exception:
-        pass
+        print(f"Total processing timeout for: {file_path}")
+        result_data = {
+            "size": 0, "resolution": "Unknown", "colors": ["#000000"] * 5, "error": "Processing Timeout"
+        }
 
     return cache_key, {
         "name": os.path.basename(file_path),
-        "category": category if category else "root",
-        "resolution": resolution,
-        "size": size,
-        "colors": colors,
+        "category": category,
+        "resolution": result_data["resolution"],
+        "size": result_data["size"],
+        "colors": result_data["colors"],
         "last_modified": last_modified,
         "folder_type": subfolder
     }
