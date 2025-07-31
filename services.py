@@ -98,7 +98,7 @@ async def process_wallpaper(file_path: str, subfolder: str, relative_path: str, 
         # Increased timeout slightly as it does all work now.
         result_data = await asyncio.wait_for(
             loop.run_in_executor(thread_pool, _process_wallpaper_blocking_tasks, file_path),
-            timeout=20.0 
+            timeout=400.0 
         )
     except asyncio.TimeoutError:
         print(f"Total processing timeout for: {file_path}")
