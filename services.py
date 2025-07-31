@@ -1,3 +1,4 @@
+import traceback
 from typing import List, Dict
 import os
 from PIL import Image
@@ -39,39 +40,39 @@ async def save_cache(asset_type: str, cache: Dict):
 
 def get_prominent_colors(image_path: str, num_colors: int = 5) -> List[str]:
     """
-    Extract the most prominent colors from an image using k-means clustering,
-    handling images with few colors gracefully.
+    Extract prominent colors using a faster k-means configuration,
+    and handle images with few colors gracefully.
     """
     try:
         with Image.open(image_path) as img:
-            img = img.resize((100, 100))  # Reduce size for faster processing
+            img = img.resize((100, 100))
             img = img.convert("RGB")
             pixels = np.array(img).reshape(-1, 3)
 
-        # Get unique colors and their counts
         unique_pixels = np.unique(pixels, axis=0)
 
-        # If unique colors are fewer than requested clusters, return them directly
         if len(unique_pixels) < num_colors:
-            # Convert unique colors to hex
             colors = [f"#{r:02x}{g:02x}{b:02x}" for r, g, b in unique_pixels]
-            # Pad the list with the most dominant color (or black) if needed
             padding_color = colors[0] if colors else "#000000"
             while len(colors) < num_colors:
                 colors.append(padding_color)
             return colors[:num_colors]
 
-        # Otherwise, proceed with k-means clustering
-        kmeans = KMeans(n_clusters=num_colors, random_state=42, n_init=10)
+        # --- OPTIMIZATION ---
+        # Changed n_init from 10 to 1 for a major speed improvement.
+        kmeans = KMeans(n_clusters=num_colors, random_state=42, n_init=1) 
         kmeans.fit(pixels)
         cluster_centers = kmeans.cluster_centers_
 
-        # Convert RGB values to hex colors
         colors = [f"#{int(r):02x}{int(g):02x}{int(b):02x}" for r, g, b in cluster_centers]
         return colors
         
     except Exception as e:
-        print(f"Error processing {image_path}: {e}")
+        # Improved error logging to show the exact problem
+        print(f"--- DETAILED ERROR in get_prominent_colors ---")
+        print(f"File: {image_path}")
+        print(traceback.format_exc())
+        print(f"--------------------------------------------")
         return ["#000000"] * num_colors
 
 async def process_wallpaper(file_path: str, subfolder: str, relative_path: str, last_modified: float):
