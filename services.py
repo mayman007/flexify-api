@@ -40,22 +40,79 @@ async def save_cache(asset_type: str, cache: Dict):
 def get_prominent_colors(image_path: str, num_colors: int = 5) -> List[str]:
     """Extract the most prominent colors from an image using k-means clustering."""
     try:
+        # Open and process the image
         with Image.open(image_path) as img:
-            img = img.resize((100, 100))  # Reduce size for faster processing
-            img = img.convert("RGB")
-            pixels = np.array(img).reshape(-1, 3)  # Flatten to a list of RGB pixels
-
-        # Apply k-means clustering with explicit n_init
-        kmeans = KMeans(n_clusters=num_colors, random_state=42, n_init=10)
-        kmeans.fit(pixels)
-        cluster_centers = kmeans.cluster_centers_
-
-        # Convert RGB values to hex colors
-        colors = [f"#{int(r):02x}{int(g):02x}{int(b):02x}" for r, g, b in cluster_centers]
-        return colors
+            # Convert to RGB first to handle various formats (RGBA, P, L, etc.)
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Resize for faster processing but keep reasonable quality
+            # Use thumbnail to maintain aspect ratio
+            img.thumbnail((150, 150), Image.Resampling.LANCZOS)
+            
+            # Convert to numpy array
+            pixels = np.array(img)
+            
+            # Check if image is valid
+            if pixels.size == 0:
+                print(f"Empty image: {image_path}")
+                return ["#808080"] * num_colors  # Return gray instead of black
+            
+            # Reshape to list of RGB pixels
+            pixels = pixels.reshape(-1, 3)
+            
+            # Remove any invalid pixels (just in case)
+            pixels = pixels[~np.isnan(pixels).any(axis=1)]
+            
+            if len(pixels) == 0:
+                print(f"No valid pixels found: {image_path}")
+                return ["#808080"] * num_colors
+            
+            # Ensure we don't have more clusters than pixels
+            actual_num_colors = min(num_colors, len(np.unique(pixels, axis=0)))
+            if actual_num_colors < num_colors:
+                print(f"Image has fewer unique colors than requested: {image_path}")
+            
+            # Apply k-means clustering
+            kmeans = KMeans(
+                n_clusters=actual_num_colors, 
+                random_state=42, 
+                n_init=10,
+                max_iter=100  # Limit iterations to prevent hanging
+            )
+            
+            kmeans.fit(pixels.astype(np.float64))  # Ensure float64 for better precision
+            cluster_centers = kmeans.cluster_centers_
+            
+            # Get cluster labels and counts to sort by popularity
+            labels = kmeans.labels_
+            label_counts = np.bincount(labels)
+            
+            # Sort colors by popularity (most frequent first)
+            sorted_indices = np.argsort(-label_counts)
+            sorted_centers = cluster_centers[sorted_indices]
+            
+            # Convert RGB values to hex colors with proper bounds checking
+            colors = []
+            for center in sorted_centers:
+                r, g, b = center
+                # Ensure values are within valid range [0, 255]
+                r = max(0, min(255, int(round(r))))
+                g = max(0, min(255, int(round(g))))
+                b = max(0, min(255, int(round(b))))
+                hex_color = f"#{r:02x}{g:02x}{b:02x}"
+                colors.append(hex_color)
+            
+            # Pad with gray if we have fewer colors than requested
+            while len(colors) < num_colors:
+                colors.append("#808080")
+            
+            return colors[:num_colors]
+            
     except Exception as e:
-        print(f"Error: {e}")
-        return ["#000000"] * num_colors
+        print(f"Error processing image {image_path}: {type(e).__name__}: {e}")
+        # Return gray colors instead of black to distinguish from actual black images
+        return ["#808080"] * num_colors
 
 async def process_wallpaper(file_path: str, subfolder: str, relative_path: str, last_modified: float):
     """Process a single wallpaper file asynchronously."""
@@ -63,23 +120,40 @@ async def process_wallpaper(file_path: str, subfolder: str, relative_path: str, 
     cache_key = f"{subfolder}/{relative_path}"
     size = os.path.getsize(file_path)
 
-    # Run CPU-bound image processing in thread pool with a timeout
-    loop = asyncio.get_running_loop()
+    # Check if file is accessible and not corrupted
     try:
-        colors = await asyncio.wait_for(
-            loop.run_in_executor(thread_pool, get_prominent_colors, file_path),
-            timeout=10.0  # 10-second timeout for color extraction
-        )
-    except asyncio.TimeoutError:
-        print(f"Timeout processing image for prominent colors: {file_path}")
-        colors = ["#000000"] * 5  # Default colors on timeout
+        # Quick file validation
+        with open(file_path, 'rb') as f:
+            # Read first few bytes to ensure file is accessible
+            header = f.read(100)
+            if len(header) < 10:
+                print(f"File too small or corrupted: {file_path}")
+                colors = ["#ff0000"]  # Red to indicate error
+            else:
+                # Run CPU-bound image processing in thread pool with extended timeout
+                loop = asyncio.get_running_loop()
+                try:
+                    colors = await asyncio.wait_for(
+                        loop.run_in_executor(thread_pool, get_prominent_colors, file_path),
+                        timeout=30.0  # Increased timeout to 30 seconds
+                    )
+                except asyncio.TimeoutError:
+                    print(f"Timeout processing image for prominent colors: {file_path}")
+                    colors = ["#ffa500"] * 5  # Orange to indicate timeout
+                except Exception as e:
+                    print(f"Error in thread pool execution for {file_path}: {e}")
+                    colors = ["#ff0000"] * 5  # Red to indicate error
+    except Exception as e:
+        print(f"File access error for {file_path}: {e}")
+        colors = ["#ff0000"] * 5  # Red to indicate file access error
     
+    # Get resolution with better error handling
     resolution = "Unknown"
     try:
         with Image.open(file_path) as img:
             resolution = f"{img.width}x{img.height}"
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Could not get resolution for {file_path}: {e}")
 
     return cache_key, {
         "name": os.path.basename(file_path),
@@ -106,6 +180,16 @@ async def update_wallpaper_cache():
             for file in files:
                 if file.endswith(ASSET_PATHS["wallpapers"]["file_types"]):
                     file_path = os.path.join(root, file)
+                    
+                    # Skip files that are too small (likely corrupted)
+                    try:
+                        if os.path.getsize(file_path) < 1024:  # Less than 1KB
+                            print(f"Skipping very small file: {file_path}")
+                            continue
+                    except OSError:
+                        print(f"Cannot access file: {file_path}")
+                        continue
+                    
                     relative_path = os.path.relpath(file_path, folder)
                     last_modified = os.path.getmtime(file_path)
 
@@ -118,9 +202,18 @@ async def update_wallpaper_cache():
                     tasks.append(process_wallpaper(file_path, subfolder, relative_path, last_modified))
 
     if tasks:
-        results = await asyncio.gather(*tasks)
-        for cache_key, data in results:
-            assets[cache_key] = data
+        # Process tasks in smaller batches to prevent overwhelming the system
+        batch_size = 10
+        for i in range(0, len(tasks), batch_size):
+            batch = tasks[i:i + batch_size]
+            results = await asyncio.gather(*batch, return_exceptions=True)
+            
+            for result in results:
+                if isinstance(result, Exception):
+                    print(f"Task failed with exception: {result}")
+                else:
+                    cache_key, data = result
+                    assets[cache_key] = data
 
     metadata_caches["wallpapers"] = assets
     await save_cache("wallpapers", assets)
