@@ -50,22 +50,22 @@ A FastAPI-based REST API for serving wallpapers, KWGT widgets, and KLWP files wi
    │   │   ├── wallpaper1.png
    │   │   └── wallpaper2.png
    │   └── category2/
-   │       ├── wallpaper1.png
-   │       └── wallpaper2.png
+   │       ├── wallpaper3.png
+   │       └── wallpaper4.png
    ├── mid/
    │   ├── category1/
    │   │   ├── wallpaper1.png
    │   │   └── wallpaper2.png
    │   └── category2/
-   │       ├── wallpaper1.png
-   │       └── wallpaper2.png
+   │       ├── wallpaper3.png
+   │       └── wallpaper4.png
    └── low/
        ├── category1/
        │   ├── wallpaper1.png
        │   └── wallpaper2.png
        └── category2/
-           ├── wallpaper1.png
-           └── wallpaper2.png
+           ├── wallpaper3.png
+           └── wallpaper4.png
    
    Widgets/
    ├── category1/
@@ -82,7 +82,7 @@ A FastAPI-based REST API for serving wallpapers, KWGT widgets, and KLWP files wi
    └── theme2.png (preview image)
    ```
 
-Note: Same wallpaper in different quality folders must hold the same name.
+Note: Same wallpapers and categories in different quality folders must hold the same names.
 
 ## Running the API
 
